@@ -413,6 +413,10 @@ pub struct SessionOptions {
     /// Enable fastresume, to restore state quickly after restart.
     pub fastresume: bool,
 
+    /// Persist have-piece bitfields for fast restarts WITHOUT restoring the
+    /// torrent list on startup. Use when you manage lifecycle yourself.
+    pub fastresume_folder: Option<PathBuf>,
+
     /// Turn on to dump session contents into a file periodically, so that on next start
     /// all remembered torrents will continue where they left off.
     pub persistence: Option<SessionPersistenceConfig>,
@@ -602,6 +606,17 @@ impl Session {
                             Ok((Some($store), Arc::new(NonPersistentBitVFactory {})))
                         }
                     };
+                }
+
+                // Bitfield-only fastresume: saves piece bitfields, never restores torrents.
+                if let Some(folder) = &opts.fastresume_folder {
+                    let store = Arc::new(
+                        JsonSessionPersistenceStore::new(folder.clone(), spawner)
+                            .await
+                            .context("error initializing fastresume store")?,
+                    );
+                    // (None, store) = no session persistence, but BitVFactory is active.
+                    return Ok((None, store as Arc<dyn BitVFactory>));
                 }
 
                 match &opts.persistence {
