@@ -77,6 +77,12 @@ impl TorrentStorage for FilesystemStorage {
             .pread_exact(offset, buf)
     }
 
+    fn file_exists(&self, file_id: usize) -> bool {
+        self.opened_files
+            .get(file_id)
+            .is_some_and(|f| f.has_content())
+    }
+
     fn pwrite_all(&self, file_id: usize, offset: u64, buf: &[u8]) -> anyhow::Result<()> {
         let of = self.opened_files.get(file_id).context("no such file")?;
         of.ensure_opened()?;

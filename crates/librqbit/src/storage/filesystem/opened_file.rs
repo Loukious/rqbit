@@ -196,6 +196,18 @@ impl OpenedFile {
         Ok(())
     }
 
+    /// Returns true only if the file is open AND has non-zero content on disk.
+    /// Used by initial_check to skip pread_exact on empty/uninitialized files.
+    pub fn has_content(&self) -> bool {
+        self.file
+            .read()
+            .fd
+            .as_ref()
+            .and_then(|fd| fd.metadata().ok())
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    }
+
     pub fn lock_read(&self) -> crate::Result<impl Deref<Target = File>> {
         RwLockReadGuard::try_map(self.file.read(), |f| f.as_ref())
             .ok()

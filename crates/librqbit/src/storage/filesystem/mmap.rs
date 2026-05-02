@@ -60,6 +60,10 @@ impl TorrentStorage for MmapFilesystemStorage {
         Ok(())
     }
 
+    fn file_exists(&self, file_id: usize) -> bool {
+        self.fs.file_exists(file_id)
+    }
+
     fn pwrite_all(&self, file_id: usize, offset: u64, buf: &[u8]) -> anyhow::Result<()> {
         let mut g = self
             .opened_mmaps

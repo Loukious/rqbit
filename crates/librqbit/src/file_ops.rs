@@ -73,6 +73,29 @@ impl<'a> FileOps<'a> {
     pub fn initial_check(&self, progress: &AtomicU64) -> anyhow::Result<BF> {
         let mut have_pieces =
             BF::from_boxed_slice(vec![0u8; self.torrent.lengths().piece_bitfield_bytes()].into());
+
+        // Fast path: if NO files exist at all, skip the entire piece loop.
+        // This is the common case when streaming a brand-new torrent.
+        let any_file_exists = self
+            .file_infos
+            .iter()
+            .enumerate()
+            .any(|(idx, fi)| !fi.attrs.padding && self.files.file_exists(idx));
+
+        if !any_file_exists {
+            progress.fetch_add(self.torrent.lengths().total_length(), Ordering::Relaxed);
+            return Ok(have_pieces);
+        }
+
+        // Pre-compute which files are missing so the inner loop never calls
+        // pread_exact on them at all — avoids N*pieces syscall failures.
+        let file_exists: Vec<bool> = self
+            .file_infos
+            .iter()
+            .enumerate()
+            .map(|(idx, fi)| fi.attrs.padding || self.files.file_exists(idx))
+            .collect();
+
         let mut piece_files = Vec::<usize>::new();
 
         #[derive(Debug)]
@@ -131,7 +154,7 @@ impl<'a> FileOps<'a> {
                 piece_remaining -= to_read_in_file;
                 current_file.mark_processed_bytes(to_read_in_file as u64);
 
-                if current_file.is_broken {
+                if current_file.is_broken || !file_exists[current_file.index] {
                     // no need to read.
                     continue;
                 }

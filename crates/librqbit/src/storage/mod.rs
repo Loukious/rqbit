@@ -165,6 +165,13 @@ pub trait TorrentStorage: Send + Sync {
     /// This is used to make the underlying object useless when e.g. pausing the torrent.
     fn take(&self) -> anyhow::Result<Box<dyn TorrentStorage>>;
 
+    /// Returns true if the file exists and has readable content on the underlying storage.
+    /// Default returns true for backwards compatibility with existing impls.
+    /// Override this so initial_check can skip pread_exact entirely for missing files.
+    fn file_exists(&self, _file_id: usize) -> bool {
+        true
+    }
+
     /// Callback called every time a piece has completed and has been validated.
     /// Default implementation does nothing, but can be override in trait implementations.
     fn on_piece_completed(&self, _piece_index: ValidPieceIndex) -> anyhow::Result<()> {
@@ -191,6 +198,10 @@ impl<U: TorrentStorage + ?Sized> TorrentStorage for Box<U> {
 
     fn take(&self) -> anyhow::Result<Box<dyn TorrentStorage>> {
         (**self).take()
+    }
+
+    fn file_exists(&self, file_id: usize) -> bool {
+        (**self).file_exists(file_id)
     }
 
     fn remove_directory_if_empty(&self, path: &Path) -> anyhow::Result<()> {
