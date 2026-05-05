@@ -269,6 +269,27 @@ impl ChunkTracker {
         self.have.as_slice()[id.get() as usize]
     }
 
+    /// Returns true if the 16KB chunk containing `torrent_abs_offset` has been written
+    /// to disk, even if the containing piece hasn't been SHA-1 verified yet.
+    ///
+    /// Used by streaming reads to serve data at chunk granularity (16KB) instead of
+    /// waiting for full piece verification (up to 4MB+), matching the behaviour of
+    /// torrent-stream / server.js.
+    pub fn is_chunk_written_at_torrent_offset(&self, torrent_abs_offset: u64) -> bool {
+        use librqbit_core::constants::CHUNK_SIZE;
+        let dpl = self.lengths.default_piece_length() as u64;
+        let piece_index = torrent_abs_offset / dpl;
+        let offset_within_piece = torrent_abs_offset % dpl;
+        let chunk_within_piece = offset_within_piece / CHUNK_SIZE as u64;
+        let chunk_status_index =
+            piece_index as usize * self.lengths.default_chunks_per_piece() as usize
+                + chunk_within_piece as usize;
+        self.chunk_status
+            .get(chunk_status_index)
+            .map(|b| *b)
+            .unwrap_or(false)
+    }
+
     pub fn mark_piece_broken_if_not_have(&mut self, index: ValidPieceIndex) {
         if self
             .have
