@@ -117,6 +117,30 @@ impl TorrentStreams {
         }
     }
 
+    /// Wake any stream whose current read position falls within the just-written chunk.
+    /// Called immediately after each 16KB block is written to disk so streams can serve
+    /// data without waiting for full-piece SHA-1 verification.
+    pub(crate) fn wake_streams_on_chunk_written(&self, chunk_torrent_abs_start: u64) {
+        use librqbit_core::constants::CHUNK_SIZE;
+        let chunk_end = chunk_torrent_abs_start + CHUNK_SIZE as u64;
+        for mut entry in self.streams.iter_mut() {
+            let stream_torrent_pos = {
+                let s = entry.value();
+                s.file_abs_offset + s.position
+            };
+            if stream_torrent_pos >= chunk_torrent_abs_start && stream_torrent_pos < chunk_end {
+                if let Some(waker) = entry.value_mut().waker.take() {
+                    debug!(
+                        stream_id = *entry.key(),
+                        chunk_start = chunk_torrent_abs_start,
+                        "waking stream on chunk written"
+                    );
+                    waker.wake();
+                }
+            }
+        }
+    }
+
     fn drop_stream(&self, stream_id: StreamId) -> Option<StreamState> {
         debug!(stream_id, "dropping stream");
         self.streams.remove(&stream_id).map(|s| s.1)
@@ -185,28 +209,42 @@ impl AsyncRead for FileStream {
                 .context("invalid position")
         );
 
-        // if the piece is not there, register to wake when it is
-        // check if we have the piece for real
-        let have = poll_try_io!(self.torrent.with_chunk_tracker(|ct| {
-            let have = ct.get_have_pieces().as_slice()[current.id.get() as usize];
-            if !have {
+        // Check if the 16KB chunk at the current read position has been written to disk.
+        // This fires as soon as each block arrives from a peer — we don't wait for
+        // the full piece to be SHA-1 verified (which could be 4MB+ away).
+        use librqbit_core::constants::CHUNK_SIZE;
+        let torrent_abs_pos = self.file_torrent_abs_offset + self.position;
+        let chunk_written = poll_try_io!(self.torrent.with_chunk_tracker(|ct| {
+            let written = ct.is_chunk_written_at_torrent_offset(torrent_abs_pos);
+            if !written {
                 self.streams
                     .register_waker(self.stream_id, cx.waker().clone());
             }
-            have
+            written
         }));
-        if !have {
-            debug!(stream_id = self.stream_id, file_id = self.file_id, piece_id = %current.id, "poll pending, not have");
+        if !chunk_written {
+            debug!(
+                stream_id = self.stream_id,
+                file_id = self.file_id,
+                piece_id = %current.id,
+                position = self.position,
+                "poll pending, chunk not yet written"
+            );
             return Poll::Pending;
         }
 
-        // actually stream the piece
+        // Cap reads to the end of the current 16KB chunk so we re-check availability
+        // at each chunk boundary. piece_remaining and file_remaining bound the rest.
+        let offset_within_chunk = torrent_abs_pos % CHUNK_SIZE as u64;
+        let bytes_remaining_in_chunk = CHUNK_SIZE as u64 - offset_within_chunk;
+
         let buf = tbuf.initialize_unfilled();
         let file_remaining = self.file_len - self.position;
         let bytes_to_read: usize = poll_try_io!(
             (buf.len() as u64)
                 .min(current.piece_remaining as u64)
                 .min(file_remaining)
+                .min(bytes_remaining_in_chunk)
                 .try_into()
         );
 

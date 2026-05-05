@@ -1844,7 +1844,10 @@ impl PeerHandler {
 
             if !cfg!(feature = "_disable_disk_write_net_benchmark") {
                 match state.file_ops().write_chunk(addr, piece, chunk_info) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        let chunk_abs = state.lengths.chunk_absolute_offset(chunk_info);
+                        state.streams.wake_streams_on_chunk_written(chunk_abs);
+                    }
                     Err(e) => {
                         error!(
                             id = state.shared.id,
