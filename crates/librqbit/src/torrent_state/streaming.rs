@@ -144,15 +144,16 @@ impl TorrentStreams {
                 let s = entry.value();
                 s.file_abs_offset + s.position
             };
-            if stream_torrent_pos >= chunk_torrent_abs_start && stream_torrent_pos < chunk_end {
-                if let Some(waker) = entry.value_mut().waker.take() {
-                    debug!(
-                        stream_id = *entry.key(),
-                        chunk_start = chunk_torrent_abs_start,
-                        "waking stream on chunk written"
-                    );
-                    waker.wake();
-                }
+            if stream_torrent_pos >= chunk_torrent_abs_start
+                && stream_torrent_pos < chunk_end
+                && let Some(waker) = entry.value_mut().waker.take()
+            {
+                debug!(
+                    stream_id = *entry.key(),
+                    chunk_start = chunk_torrent_abs_start,
+                    "waking stream on chunk written"
+                );
+                waker.wake();
             }
         }
     }

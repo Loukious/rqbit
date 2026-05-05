@@ -277,13 +277,21 @@ impl ChunkTracker {
     /// torrent-stream / server.js.
     pub fn is_chunk_written_at_torrent_offset(&self, torrent_abs_offset: u64) -> bool {
         use librqbit_core::constants::CHUNK_SIZE;
+
         let dpl = self.lengths.default_piece_length() as u64;
         let piece_index = torrent_abs_offset / dpl;
         let offset_within_piece = torrent_abs_offset % dpl;
         let chunk_within_piece = offset_within_piece / CHUNK_SIZE as u64;
-        let chunk_status_index =
-            piece_index as usize * self.lengths.default_chunks_per_piece() as usize
-                + chunk_within_piece as usize;
+
+        let chunks_per_piece = u64::from(self.lengths.default_chunks_per_piece());
+        let Some(chunk_status_index) = piece_index
+            .checked_mul(chunks_per_piece)
+            .and_then(|i| i.checked_add(chunk_within_piece))
+            .and_then(|i| usize::try_from(i).ok())
+        else {
+            return false;
+        };
+
         self.chunk_status
             .get(chunk_status_index)
             .map(|b| *b)
@@ -457,8 +465,8 @@ impl ChunkTracker {
 
         // Convert to piece indices
         let piece_len = self.lengths.default_piece_length() as u64;
-        let start_piece = (window_start / piece_len) as u32;
-        let end_piece = window_end.div_ceil(piece_len) as u32;
+        let start_piece = u32::try_from(window_start / piece_len).unwrap_or(u32::MAX);
+        let end_piece = u32::try_from(window_end.div_ceil(piece_len)).unwrap_or(u32::MAX);
 
         let mut added = 0usize;
         let mut removed = 0usize;
@@ -901,7 +909,7 @@ mod tests {
 
         // Now seek forward to 70%
         let position2 = (piece_len as u64) * 7;
-        let result =
+        let _result =
             ct.update_streaming_window(0, &file_info, position2, piece_len as u64, forward);
 
         // Old pieces should be removed

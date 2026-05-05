@@ -98,10 +98,8 @@ impl Magnet {
                     }
                 }
                 "tr" => trackers.push(value.into()),
-                "dn" => {
-                    if !value.is_empty() {
-                        name = Some(value.into_owned())
-                    }
+                "dn" if !value.is_empty() => {
+                    name = Some(value.into_owned());
                 }
                 "so" => {
                     // Process 'so' values, but silently ignore any which fail parsing

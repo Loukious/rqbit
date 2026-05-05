@@ -64,6 +64,7 @@ pub use self::streaming::FileStream;
 //
 // - initializing -> error
 // - live -> error
+#[allow(clippy::large_enum_variant)]
 pub enum ManagedTorrentState {
     Initializing(Arc<TorrentStateInitializing>),
     Paused(TorrentStatePaused),
@@ -333,7 +334,11 @@ impl ManagedTorrent {
     pub fn is_piece_downloaded(&self, piece_index: usize) -> bool {
         self.with_chunk_tracker(|ct| {
             let lengths = ct.get_lengths();
-            lengths.validate_piece_index(piece_index as u32)
+            let Ok(piece_index) = u32::try_from(piece_index) else {
+                return false;
+            };
+            lengths
+                .validate_piece_index(piece_index)
                 .map(|idx| ct.is_piece_have(idx))
                 .unwrap_or(false)
         })
