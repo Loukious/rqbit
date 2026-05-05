@@ -39,12 +39,25 @@ impl StreamState {
     }
 
     fn queue<'a>(&self, lengths: &'a Lengths) -> impl Iterator<Item = ValidPieceIndex> + use<'a> {
+        let file_end = self.file_abs_offset + self.file_len;
         let start = self.file_abs_offset + self.position;
-        let end = (start + PER_STREAM_BUF_DEFAULT).min(self.file_abs_offset + self.file_len);
-        let dpl = lengths.default_piece_length();
-        let start_id = (start / dpl as u64).try_into().unwrap();
-        let end_id = end.div_ceil(dpl as u64).try_into().unwrap();
-        (start_id..end_id).filter_map(|i| lengths.validate_piece_index(i))
+        let end = (start + PER_STREAM_BUF_DEFAULT).min(file_end);
+
+        let dpl = lengths.default_piece_length() as u64;
+        let start_id = (start / dpl).try_into().unwrap();
+        let end_id = end.div_ceil(dpl).try_into().unwrap();
+
+        // Also prefetch the last ~2MB of the file (MKV seek table) so mpv can
+        // read it in parallel with the container header instead of sequentially.
+        const TAIL_PREFETCH: u64 = 2 * 1024 * 1024;
+        let tail_start = file_end.saturating_sub(TAIL_PREFETCH);
+        let tail_start_id: u32 = (tail_start / dpl).try_into().unwrap();
+        let tail_end_id: u32 = file_end.div_ceil(dpl).try_into().unwrap();
+
+        let head = (start_id..end_id).filter_map(|i| lengths.validate_piece_index(i));
+        let tail = (tail_start_id..tail_end_id).filter_map(|i| lengths.validate_piece_index(i));
+
+        head.chain(tail)
     }
 }
 
@@ -156,9 +169,6 @@ pub struct FileStream {
     metadata: Arc<TorrentMetadata>,
     streams: Arc<TorrentStreams>,
     stream_id: usize,
-    /// ID of the synthetic tail-window StreamState registered for first/last
-    /// piece priority.  Dropped alongside the main stream.
-    tail_stream_id: Option<usize>,
     file_id: usize,
     position: u64,
 
@@ -314,9 +324,6 @@ impl AsyncSeek for FileStream {
 impl Drop for FileStream {
     fn drop(&mut self) {
         self.streams.drop_stream(self.stream_id);
-        if let Some(tail_id) = self.tail_stream_id {
-            self.streams.drop_stream(tail_id);
-        }
     }
 }
 
@@ -392,7 +399,6 @@ impl ManagedTorrent {
         let s = FileStream {
             stream_id: streams.next_id(),
             streams: streams.clone(),
-            tail_stream_id: None, // filled in below after tail registration
             file_id,
             position: 0,
 
@@ -412,43 +418,6 @@ impl ManagedTorrent {
                 file_abs_offset: fd_offset,
             },
         );
-
-        // "First/last piece priority": register a synthetic read-only window
-        // at the tail of the file so the download scheduler fetches the last
-        // 32 MB in parallel with the opening pieces.
-        //
-        // MKV stores its EBML Cues index at EOF; MP4 moov atoms are often at
-        // EOF too.  mpv always issues a probe range request to EOF before it
-        // will seek to any timestamp.  With the semaphore removed that probe
-        // opens its own FileStream — but we also pre-populate the tail window
-        // here so pieces are already in flight before mpv even sends the
-        // probe request.
-        //
-        // The tail window has no waker; it is never advanced.  It is removed
-        // when the owning FileStream is dropped.
-        const TAIL_WINDOW: u64 = 32 * 1024 * 1024;
-        let tail_stream_id = if fd_len > TAIL_WINDOW * 2 {
-            let tail_id = streams.next_id();
-            streams.streams.insert(
-                tail_id,
-                StreamState {
-                    file_id,
-                    position: fd_len - TAIL_WINDOW,
-                    waker: None,
-                    file_len: fd_len,
-                    file_abs_offset: fd_offset,
-                },
-            );
-            debug!(stream_id = s.stream_id, tail_id, file_id, "registered tail window");
-            Some(tail_id)
-        } else {
-            None
-        };
-
-        // Back-fill the tail_stream_id now that we have it.
-        // (Struct update syntax `..s` doesn't work when Drop is implemented.)
-        let mut s = s;
-        s.tail_stream_id = tail_stream_id;
 
         debug!(stream_id = s.stream_id, file_id, "started stream");
 
