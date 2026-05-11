@@ -11,18 +11,17 @@ pub struct FileInfo {
     pub len: u64,
 }
 
-// Iterate file pieces in the following order: first, last, everything else from start to end.
+// Iterate file pieces in a streaming-friendly order: first, last, then the rest.
 fn iter_piece_priorities(range: std::ops::Range<usize>) -> impl Iterator<Item = usize> {
-    // First and last of each file first, then the rest of pieces in that file.
     let r = range;
     use std::iter::once;
 
+    let len = r.len();
     let first = once(r.start);
-    let last = once(r.start + r.len().overflowing_sub(1).0); // it's ok if it repeats, doesn't matter
-    let mid = r.clone().skip(1).take(r.len().overflowing_sub(2).0);
+    let last = once(r.end.saturating_sub(1));
+    let mid = r.clone().skip(1).take(len.saturating_sub(2));
 
-    // The take(r.len()) is to not yield start/end pieces in case of 0 and 1 lengths.
-    first.chain(last).chain(mid).take(r.len())
+    first.chain(last).chain(mid).take(len)
 }
 
 impl FileInfo {

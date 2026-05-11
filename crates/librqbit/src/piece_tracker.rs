@@ -149,15 +149,22 @@ impl PieceTracker {
 
         // Then check naturally ordered queued pieces
         // Note: iter_queued_pieces only returns pieces in queue_pieces (not in-flight)
-        let queued: Vec<_> = self
+        let mut selected: Option<ValidPieceIndex> = None;
+        for piece in self
             .chunks
             .iter_queued_pieces(req.file_priorities, req.file_infos)
-            .collect();
-
-        for piece in queued {
-            if (req.peer_has_piece)(piece) {
-                return self.reserve_piece(piece, req.peer);
+        {
+            if self.chunks.is_piece_have(piece) || self.inflight.contains_key(&piece) {
+                continue;
             }
+            if (req.peer_has_piece)(piece) {
+                selected = Some(piece);
+                break;
+            }
+        }
+
+        if let Some(piece) = selected {
+            return self.reserve_piece(piece, req.peer);
         }
 
         // 3. Try steal with 3x threshold (moderately slow peer)
@@ -746,7 +753,7 @@ mod tests {
         let peer_a = peer(1);
         let peer_b = peer(2);
 
-        // Peer A reserves pieces 0 and 4 (first two in iteration order)
+        // Peer A reserves pieces 0 and 1 (first two in sequential iteration order)
         let piece_0 = match tracker.acquire_piece(AcquireRequest {
             peer: peer_a,
             peer_avg_time: None,
@@ -763,7 +770,7 @@ mod tests {
             _ => panic!("Expected Reserved"),
         };
 
-        let piece_4 = match tracker.acquire_piece(AcquireRequest {
+        let piece_1 = match tracker.acquire_piece(AcquireRequest {
             peer: peer_a,
             peer_avg_time: None,
             priority_pieces: std::iter::empty(),
@@ -773,7 +780,7 @@ mod tests {
             can_steal: |_| true,
         }) {
             AcquireResult::Reserved(p) => {
-                assert_eq!(p.get(), 4);
+                assert_eq!(p.get(), 1);
                 p
             }
             _ => panic!("Expected Reserved"),
@@ -784,21 +791,21 @@ mod tests {
 
         // Peer B tries to acquire with:
         // - Very short avg_time (1ms) so 3x threshold = 3ms < 5ms elapsed
-        // - peer_has_piece returns true ONLY for piece 4, NOT piece 0
+        // - peer_has_piece returns true ONLY for piece 1, NOT piece 0
         let result = tracker.acquire_piece(AcquireRequest {
             peer: peer_b,
             peer_avg_time: Some(Duration::from_millis(1)),
             priority_pieces: std::iter::empty(),
             file_priorities: &file_priorities,
             file_infos: &file_infos,
-            peer_has_piece: |p| p.get() == 4, // Peer B only has piece 4
+            peer_has_piece: |p| p.get() == 1, // Peer B only has piece 1
             can_steal: |_| true,
         });
 
-        // Should steal piece 4 (which peer B has), NOT piece 0 (which peer B doesn't have)
+        // Should steal piece 1 (which peer B has), NOT piece 0 (which peer B doesn't have)
         match result {
             AcquireResult::Stolen { piece, from_peer } => {
-                assert_eq!(piece, piece_4, "Should steal piece 4 (the one peer B has)");
+                assert_eq!(piece, piece_1, "Should steal piece 1 (the one peer B has)");
                 assert_eq!(from_peer, peer_a);
                 // Verify piece 0 is still owned by peer A (wasn't stolen)
                 assert_eq!(tracker.get_inflight(piece_0).unwrap().peer, peer_a);

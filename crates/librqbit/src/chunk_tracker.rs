@@ -52,7 +52,7 @@ pub struct ChunkTracker {
 pub struct StreamingWindowUpdate {
     /// Number of pieces added to the download queue
     pub pieces_added: usize,
-    /// Number of pieces removed from the download queue
+    /// Number of pieces removed from the download queue (always 0; streaming window updates are additive)
     pub pieces_removed: usize,
     /// First piece index in the active window
     pub window_start_piece: u32,
@@ -317,6 +317,7 @@ impl ChunkTracker {
 
     pub fn mark_piece_downloaded(&mut self, idx: ValidPieceIndex) {
         let id = idx.get() as usize;
+        self.queue_pieces.set(id, false);
         if !self.have.as_slice()[id] {
             self.have.as_slice_mut().set(id, true);
             let len = self.lengths.piece_length(idx) as u64;
@@ -434,10 +435,12 @@ impl ChunkTracker {
         &self.per_file_bytes
     }
 
-    /// Update the download queue to only include pieces within a streaming window.
+    /// Ensure pieces within a streaming window are queued for download.
     ///
-    /// This enables "stream-only" downloading where we only download pieces
-    /// from the current playback position forward, plus a small backward buffer.
+    /// This method is additive: it only (re)adds missing pieces inside the window and
+    /// never removes pieces outside the window from `queue_pieces`. This preserves the
+    /// durable selected-file download queue so downloading can continue even if
+    /// playback pauses or the streaming position jumps.
     ///
     /// # Arguments
     /// * `file_info` - The file being streamed
@@ -446,7 +449,7 @@ impl ChunkTracker {
     /// * `forward_bytes` - How many bytes ahead of current position to keep in queue
     ///
     /// # Returns
-    /// The number of pieces added and removed from the queue
+    /// The number of pieces added (and removed, always 0) from the queue.
     pub fn update_streaming_window(
         &mut self,
         file_id: usize,
@@ -469,7 +472,6 @@ impl ChunkTracker {
         let end_piece = u32::try_from(window_end.div_ceil(piece_len)).unwrap_or(u32::MAX);
 
         let mut added = 0usize;
-        let mut removed = 0usize;
 
         // Iterate over all pieces in the file's range
         for piece_idx in file_info.piece_range.clone() {
@@ -487,11 +489,6 @@ impl ChunkTracker {
             if should_be_queued && !currently_queued {
                 self.queue_pieces.set(idx, true);
                 added += 1;
-            } else if !should_be_queued && currently_queued {
-                // Only remove from queue if it's part of this file
-                // (don't accidentally remove pieces from other files)
-                self.queue_pieces.set(idx, false);
-                removed += 1;
             }
         }
 
@@ -504,7 +501,7 @@ impl ChunkTracker {
 
         StreamingWindowUpdate {
             pieces_added: added,
-            pieces_removed: removed,
+            pieces_removed: 0,
             window_start_piece: start_piece,
             window_end_piece: end_piece,
         }
@@ -843,31 +840,22 @@ mod tests {
 
         let result = ct.update_streaming_window(0, &file_info, position, backward, forward);
 
-        // Window should be roughly pieces 4-8 (backward: 4, current+forward: 5,6,7,8)
-        assert!(result.pieces_removed > 0, "should have removed some pieces");
+        // Window should be roughly pieces 4-8 (backward: 4, current+forward: 5,6,7)
+        assert_eq!(result.window_start_piece, 4);
+        assert_eq!(result.window_end_piece, 8);
+        assert_eq!(result.pieces_removed, 0);
+        assert_eq!(result.pieces_added, 0);
 
-        // Pieces before the window should NOT be queued
-        assert!(!ct.queue_pieces[0], "piece 0 should not be queued");
-        assert!(!ct.queue_pieces[1], "piece 1 should not be queued");
-        assert!(!ct.queue_pieces[2], "piece 2 should not be queued");
-        assert!(!ct.queue_pieces[3], "piece 3 should not be queued");
-
-        // Pieces in the window SHOULD be queued
-        assert!(
-            ct.queue_pieces[4],
-            "piece 4 should be queued (backward buffer)"
-        );
-        assert!(ct.queue_pieces[5], "piece 5 should be queued (current)");
-        assert!(ct.queue_pieces[6], "piece 6 should be queued (forward)");
-        assert!(ct.queue_pieces[7], "piece 7 should be queued (forward)");
-
-        // Pieces after the window should NOT be queued
-        assert!(!ct.queue_pieces[9], "piece 9 should not be queued");
+        // Streaming window updates are additive; they must not prune the durable queue.
+        for i in 0..10 {
+            assert!(ct.queue_pieces[i], "piece {} should remain queued", i);
+        }
+        assert_eq!(ct.get_streaming_window(0), Some(4..8));
     }
 
     #[test]
     fn test_streaming_window_seek_forward() {
-        // Test seeking forward - old pieces should be removed from queue
+        // Test seeking forward - old pieces should NOT be removed from queue
         let piece_len = CHUNK_SIZE * 2;
         let total_len = piece_len as u64 * 10;
         let l = Lengths::new(total_len, piece_len).unwrap();
@@ -909,31 +897,19 @@ mod tests {
 
         // Now seek forward to 70%
         let position2 = (piece_len as u64) * 7;
-        let _result =
+        let result =
             ct.update_streaming_window(0, &file_info, position2, piece_len as u64, forward);
 
-        // Old pieces should be removed
-        assert!(
-            !ct.queue_pieces[2],
-            "piece 2 should be removed after seek forward"
-        );
-        assert!(
-            !ct.queue_pieces[3],
-            "piece 3 should be removed after seek forward"
-        );
-        assert!(
-            !ct.queue_pieces[4],
-            "piece 4 should be removed after seek forward"
-        );
+        // Streaming window updates must not prune old queued pieces.
+        assert!(ct.queue_pieces[2], "piece 2 should remain queued after seek");
+        assert!(ct.queue_pieces[3], "piece 3 should remain queued after seek");
+        assert!(ct.queue_pieces[4], "piece 4 should remain queued after seek");
 
-        // New window pieces should be queued
-        assert!(
-            ct.queue_pieces[6],
-            "piece 6 should be queued (backward buffer)"
-        );
-        assert!(ct.queue_pieces[7], "piece 7 should be queued (current)");
-        assert!(ct.queue_pieces[8], "piece 8 should be queued (forward)");
-        assert!(ct.queue_pieces[9], "piece 9 should be queued (forward)");
+        // Window should update and removals should remain zero.
+        assert_eq!(result.window_start_piece, 6);
+        assert_eq!(result.window_end_piece, 10);
+        assert_eq!(result.pieces_removed, 0);
+        assert_eq!(ct.get_streaming_window(0), Some(6..10));
     }
 
     #[test]
@@ -1003,14 +979,8 @@ mod tests {
         assert!(ct.queue_pieces[7], "piece 7 should be queued");
         assert!(ct.queue_pieces[8], "piece 8 should be queued");
 
-        // Pieces outside window should NOT be queued
-        assert!(
-            !ct.queue_pieces[0],
-            "piece 0 should not be queued (outside window)"
-        );
-        assert!(
-            !ct.queue_pieces[1],
-            "piece 1 should not be queued (outside window)"
-        );
+        // Pieces outside the window remain queued (no pruning)
+        assert!(ct.queue_pieces[0], "piece 0 should remain queued");
+        assert!(ct.queue_pieces[1], "piece 1 should remain queued");
     }
 }

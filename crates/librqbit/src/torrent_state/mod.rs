@@ -292,8 +292,9 @@ impl ManagedTorrent {
 
     /// Update the streaming download window
     ///
-    /// This restricts downloading to only pieces within the specified window
-    /// around the current playback position.
+    /// This is additive: it ensures pieces within the specified window are queued,
+    /// but it does not prune pieces outside the window from the durable selected-file
+    /// download queue.
     pub fn update_streaming_window(
         &self,
         file_id: usize,

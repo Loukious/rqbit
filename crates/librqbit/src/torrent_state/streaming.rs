@@ -43,24 +43,28 @@ impl StreamState {
 
     fn queue<'a>(&self, lengths: &'a Lengths) -> impl Iterator<Item = ValidPieceIndex> + use<'a> {
         let file_end = self.file_abs_offset + self.file_len;
-        let start = self.file_abs_offset + self.position;
-        let end = (start + PER_STREAM_BUF_DEFAULT).min(file_end);
+        let start = self.file_abs_offset + self.position.min(self.file_len);
+        let urgent_end = start.saturating_add(PER_STREAM_BUF_DEFAULT).min(file_end);
 
         let dpl = lengths.default_piece_length() as u64;
-        let start_id = (start / dpl).try_into().unwrap();
-        let end_id = end.div_ceil(dpl).try_into().unwrap();
+        let start_id: u32 = (start / dpl).try_into().unwrap();
+        let urgent_end_id: u32 = urgent_end.div_ceil(dpl).try_into().unwrap();
+        let file_end_id: u32 = file_end.div_ceil(dpl).try_into().unwrap();
 
         // Also prefetch the last ~2MB of the file (MKV seek table) so mpv can
         // read it in parallel with the container header instead of sequentially.
         const TAIL_PREFETCH: u64 = 2 * 1024 * 1024;
         let tail_start = file_end.saturating_sub(TAIL_PREFETCH);
         let tail_start_id: u32 = (tail_start / dpl).try_into().unwrap();
-        let tail_end_id: u32 = file_end.div_ceil(dpl).try_into().unwrap();
+        let tail_end_id: u32 = file_end_id;
 
-        let head = (start_id..end_id).filter_map(|i| lengths.validate_piece_index(i));
+        // Priority order:
+        //   1. The normal 32 MiB playback window for fast startup and low seek latency.
+        //   2. The container tail, useful for MKV/MP4 metadata and seeks.
+        let urgent = (start_id..urgent_end_id).filter_map(|i| lengths.validate_piece_index(i));
         let tail = (tail_start_id..tail_end_id).filter_map(|i| lengths.validate_piece_index(i));
 
-        head.chain(tail)
+        urgent.chain(tail)
     }
 }
 
