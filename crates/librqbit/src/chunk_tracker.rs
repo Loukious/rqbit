@@ -14,13 +14,13 @@ use crate::{
 
 pub struct ChunkTracker {
     // This forms the basis of a "queue" to pull from.
-    // It's set to 1 if we need a piece, but the moment we start requesting a peer,
-    // it's set to 0.
     //
-    // Initially this is the opposite of "have", until we start making requests.
-    // An in-flight request is not in in the queue, and not in "have".
+    // Semantics:
+    // - `1` => this piece is wanted and not yet completed (HAVE=false), and is currently
+    //   available to reserve/request.
+    // - `0` => either we already HAVE it, it's not wanted, or it's currently reserved/in-flight.
     //
-    // needed initial value = selected & !have
+    // Initial value: `selected & !have`.
     queue_pieces: BF,
 
     // This has a bit set per each chunk (block) that we have written to the output file.
@@ -433,6 +433,32 @@ impl ChunkTracker {
 
     pub fn per_file_have_bytes(&self) -> &[u64] {
         &self.per_file_bytes
+    }
+
+    /// For each file, return how many bytes from the start of that file form a contiguous
+    /// verified prefix (i.e. consecutive HAVE pieces starting from the file's first piece).
+    pub fn per_file_contiguous_bytes(&self, file_infos: &FileInfos) -> Vec<u64> {
+        let have = self.have.as_slice();
+        file_infos
+            .iter()
+            .map(|file_info| {
+                let mut contiguous = 0u64;
+                for piece in file_info.piece_range.clone() {
+                    let Some(bit) = have.get(piece as usize) else {
+                        break;
+                    };
+                    if !*bit {
+                        break;
+                    }
+                    contiguous += self.lengths.size_of_piece_in_file(
+                        piece,
+                        file_info.offset_in_torrent,
+                        file_info.len,
+                    );
+                }
+                contiguous.min(file_info.len)
+            })
+            .collect()
     }
 
     /// Ensure pieces within a streaming window are queued for download.

@@ -579,6 +579,7 @@ impl ManagedTorrent {
                 .map(|r| r.info.lengths().total_length())
                 .unwrap_or_default(),
             file_progress: Vec::new(),
+            file_contiguous_bytes: Vec::new(),
             state: S::Error,
             error: None,
             progress_bytes: 0,
@@ -600,6 +601,9 @@ impl ManagedTorrent {
                     resp.progress_bytes = hns.progress();
                     resp.finished = hns.finished();
                     resp.file_progress = p.chunk_tracker.per_file_have_bytes().to_owned();
+                    resp.file_contiguous_bytes = self
+                        .with_metadata(|m| p.chunk_tracker.per_file_contiguous_bytes(&m.file_infos))
+                        .unwrap_or_default();
                 }
                 ManagedTorrentState::Live(l) => {
                     resp.state = S::Live;
@@ -609,12 +613,18 @@ impl ManagedTorrent {
                     resp.progress_bytes = hns.progress();
                     resp.finished = hns.finished();
                     resp.uploaded_bytes = l.get_uploaded_bytes();
-                    resp.file_progress = l
-                        .lock_read("file_progress")
-                        .get_chunks()
-                        .ok()
-                        .map(|c| c.per_file_have_bytes().to_owned())
-                        .unwrap_or_default();
+                    {
+                        let g = l.lock_read("file_progress");
+                        if let Ok(ct) = g.get_chunks() {
+                            resp.file_progress = ct.per_file_have_bytes().to_owned();
+                            resp.file_contiguous_bytes = self
+                                .with_metadata(|m| ct.per_file_contiguous_bytes(&m.file_infos))
+                                .unwrap_or_default();
+                        } else {
+                            resp.file_progress = Vec::new();
+                            resp.file_contiguous_bytes = Vec::new();
+                        }
+                    }
                     resp.live = Some(live_stats);
                 }
                 ManagedTorrentState::Error(e) => {
