@@ -224,29 +224,14 @@ impl AsyncRead for FileStream {
                 .context("invalid position")
         );
 
-        // Check if the 16KB chunk at the current read position has been written to disk.
-        // This fires as soon as each block arrives from a peer — we don't wait for
-        // the full piece to be SHA-1 verified (which could be 4MB+ away).
+        // Only serve bytes from pieces that passed SHA-1 validation.
+        // Unverified chunks can feed corrupt bytes to mpv and make timestamps jump wildly.
         use librqbit_core::constants::CHUNK_SIZE;
         let torrent_abs_pos = self.file_torrent_abs_offset + self.position;
-        let chunk_written = poll_try_io!(self.torrent.with_chunk_tracker(|ct| {
-            let written = ct.is_chunk_written_at_torrent_offset(torrent_abs_pos);
-            if !written {
-                self.streams
-                    .register_waker(self.stream_id, cx.waker().clone());
-            }
-            written
-        }));
-        if !chunk_written {
-            debug!(
-                stream_id = self.stream_id,
-                file_id = self.file_id,
-                piece_id = %current.id,
-                position = self.position,
-                "poll pending, chunk not yet written"
-            );
-            return Poll::Pending;
-        }
+        let piece_verified = poll_try_io!(
+            self.torrent
+                .with_chunk_tracker(|ct| ct.is_piece_have(current.id))
+        );
 
         // Cap reads to the end of the current 16KB chunk so we re-check availability
         // at each chunk boundary. piece_remaining and file_remaining bound the rest.
@@ -265,19 +250,36 @@ impl AsyncRead for FileStream {
 
         let buf = &mut buf[..bytes_to_read];
 
+        if !piece_verified {
+            self.streams
+                .register_waker(self.stream_id, cx.waker().clone());
+
+            debug!(
+                stream_id = self.stream_id,
+                file_id = self.file_id,
+                piece_id = %current.id,
+                position = self.position,
+                "poll pending, piece not yet verified"
+            );
+            return Poll::Pending;
+        }
+
         let start = Instant::now();
-        poll_try_io!(poll_try_io!(self.torrent.shared.spawner.block_in_place(
-            || {
-                self.torrent.with_storage_and_file(
-                    self.file_id,
-                    |files, _fi| {
-                        files.pread_exact(self.file_id, self.position, buf)?;
-                        Ok::<_, anyhow::Error>(())
-                    },
-                    &self.metadata,
-                )
-            }
-        )));
+        let read_result = self.torrent.shared.spawner.block_in_place(|| {
+            self.torrent.with_storage_and_file(
+                self.file_id,
+                |files, _fi| {
+                    files.pread_exact(self.file_id, self.position, buf)?;
+                    Ok::<_, anyhow::Error>(())
+                },
+                &self.metadata,
+            )
+        });
+
+        if let Err(error) = map_io_err!(read_result).and_then(|inner| map_io_err!(inner)) {
+            debug!("stream error {error:#}");
+            return Poll::Ready(Err(error));
+        }
 
         trace!(
             buflen = buf.len(),
