@@ -196,14 +196,14 @@ impl OpenedFile {
         Ok(())
     }
 
-    /// Returns true only if the file is open AND has non-zero content on disk.
+    /// Returns true if the open or lazy file has non-zero content on disk.
     /// Used by initial_check to skip pread_exact on empty/uninitialized files.
     pub fn has_content(&self) -> bool {
-        self.file
-            .read()
-            .fd
+        let file = self.file.read();
+        file.fd
             .as_ref()
             .and_then(|fd| fd.metadata().ok())
+            .or_else(|| std::fs::metadata(&file.path).ok())
             .map(|m| m.len() > 0)
             .unwrap_or(false)
     }
@@ -243,13 +243,42 @@ impl OpenedFile {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{Read, Write};
 
     use librqbit_core::constants::CHUNK_SIZE;
     use peer_binary_protocol::DoubleBufHelper;
     use tempfile::TempDir;
 
-    use crate::storage::filesystem::opened_file::OurFileExt;
+    use crate::storage::filesystem::opened_file::{OpenedFile, OurFileExt};
+
+    #[test]
+    fn lazy_file_detects_and_reopens_persisted_content() {
+        let td = TempDir::with_prefix("test_lazy_file_content").unwrap();
+        let path = td.path().join("spill.bin");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"persisted")
+            .unwrap();
+
+        let file = OpenedFile::new_lazy(path);
+        assert!(file.has_content());
+
+        file.ensure_opened().unwrap();
+        let mut content = [0u8; 9];
+        file.lock_read()
+            .unwrap()
+            .pread_exact(0, &mut content)
+            .unwrap();
+        assert_eq!(&content, b"persisted");
+    }
+
+    #[test]
+    fn lazy_file_without_disk_content_is_empty() {
+        let td = TempDir::with_prefix("test_lazy_file_empty").unwrap();
+        let file = OpenedFile::new_lazy(td.path().join("missing.bin"));
+
+        assert!(!file.has_content());
+    }
 
     #[test]
     fn test_pwrite_all_vectored() {

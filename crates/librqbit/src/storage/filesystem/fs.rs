@@ -18,11 +18,25 @@ use crate::storage::{StorageFactory, TorrentStorage};
 use super::opened_file::OpenedFile;
 
 fn overlap_spill_root(shared: &ManagedTorrentShared) -> PathBuf {
-    std::env::temp_dir().join("rqbit-overlap").join(format!(
-        "{}-{}",
-        shared.info_hash.as_string(),
-        shared.id
-    ))
+    let base = std::env::temp_dir().join("rqbit-overlap");
+    let info_hash = shared.info_hash.as_string();
+    let stable = base.join(&info_hash);
+    let legacy = base.join(format!("{}-{}", info_hash, shared.id));
+
+    if !stable.exists()
+        && legacy.exists()
+        && let Err(error) = std::fs::rename(&legacy, &stable)
+    {
+        warn!(
+            ?error,
+            from = ?legacy,
+            to = ?stable,
+            "failed to migrate overlap spill directory"
+        );
+        return legacy;
+    }
+
+    stable
 }
 
 #[derive(Default, Clone, Copy)]
@@ -70,11 +84,9 @@ impl FilesystemStorage {
 
 impl TorrentStorage for FilesystemStorage {
     fn pread_exact(&self, file_id: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()> {
-        self.opened_files
-            .get(file_id)
-            .context("no such file")?
-            .lock_read()?
-            .pread_exact(offset, buf)
+        let file = self.opened_files.get(file_id).context("no such file")?;
+        file.ensure_opened()?;
+        file.lock_read()?.pread_exact(offset, buf)
     }
 
     fn file_exists(&self, file_id: usize) -> bool {
