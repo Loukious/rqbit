@@ -31,6 +31,8 @@ pub struct InflightPiece {
     pub started: Instant,
 }
 
+const STREAM_PRIORITY_STEAL_AFTER: Duration = Duration::from_secs(2);
+
 /// Result of attempting to acquire a piece.
 #[derive(Debug)]
 pub enum AcquireResult {
@@ -136,15 +138,41 @@ impl PieceTracker {
             return result;
         }
 
-        // 2. Try reserve from priority_pieces then queued pieces
-        // First check priority pieces that aren't already downloaded or in-flight
+        // 2. Try reserve or reclaim priority pieces before falling back to the
+        // naturally ordered queue. Streaming reads block on the exact current
+        // piece, so a stalled in-flight priority piece should not leave playback
+        // waiting while less important pieces keep downloading.
         for piece in &mut req.priority_pieces {
-            if !self.chunks.is_piece_have(piece)
-                && !self.inflight.contains_key(&piece)
-                && (req.peer_has_piece)(piece)
-            {
+            if self.chunks.is_piece_have(piece) || !(req.peer_has_piece)(piece) {
+                continue;
+            }
+
+            if !self.inflight.contains_key(&piece) {
                 return self.reserve_piece(piece, req.peer);
             }
+
+            let Some(inflight) = self.inflight.get(&piece) else {
+                continue;
+            };
+            let can_reclaim = inflight.peer != req.peer
+                && inflight.started.elapsed() >= STREAM_PRIORITY_STEAL_AFTER;
+            if !can_reclaim {
+                continue;
+            }
+            if !(req.can_steal)(piece) {
+                continue;
+            }
+
+            let old_peer = inflight.peer;
+            if let Some(inflight) = self.inflight.get_mut(&piece) {
+                inflight.peer = req.peer;
+                inflight.started = Instant::now();
+            }
+
+            return AcquireResult::Stolen {
+                piece,
+                from_peer: old_peer,
+            };
         }
 
         // Then check naturally ordered queued pieces
